@@ -18,6 +18,7 @@
    See docs/assertion-api-proposal.md for the full design."
   (:require [stroopwafel.core :as engine]
             [stroopwafel.pdp.spki.assertion :as assertion]
+            [stroopwafel.pdp.spki.revocation :as revocation]
             [stroopwafel.pdp.spki.trust :as trust]))
 
 ;; ---------------------------------------------------------------------------
@@ -172,43 +173,6 @@
       capped                        capped
       :else                         stated-not-after)))
 
-(defn- collect-revocations
-  "Scan verified blocks' assertions for :revocation statements,
-   combined with any out-of-band source. Returns
-   {:ids #{} :keys #{} :subjects #{}}."
-  [verified-blocks rev-src]
-  (let [base     {:ids #{} :keys #{} :subjects #{}}
-        in-band  (reduce
-                  (fn [acc vb]
-                    (reduce
-                     (fn [acc2 a]
-                       (if (= :revocation (:type a))
-                         (let [[scope target] (:statement a)]
-                           (case scope
-                             :assertion (update acc2 :ids conj target)
-                             :key       (update acc2 :keys conj target)
-                             :subject   (update acc2 :subjects conj target)
-                             acc2))
-                         acc2))
-                     acc
-                     (:assertions vb)))
-                  base
-                  verified-blocks)
-        external (when rev-src (rev-src))]
-    (cond-> in-band
-      (:ids external)      (update :ids into (:ids external))
-      (:keys external)     (update :keys into (:keys external))
-      (:subjects external) (update :subjects into (:subjects external)))))
-
-(defn- revoked?
-  "Is this assertion revoked? Checks id, sayer-key, and subject
-   (first element of the statement, by convention)."
-  [rev-set sayer-kid a]
-  (or (contains? (:ids rev-set) (:id a))
-      (contains? (:keys rev-set) sayer-kid)
-      (let [subject (first (:statement a))]
-        (and subject (contains? (:subjects rev-set) subject)))))
-
 (defn- expand-assertion
   "Flatten a verified assertion into a Datalog fact tuple:
      [sayer signing-ts not-before not-after type id & statement]
@@ -294,14 +258,14 @@
          valid-blocks)
 
         ;; Pass 5: collect revocation set from trust-filtered assertions.
-        ;; Re-group survivors by block so collect-revocations sees the
-        ;; block shape it expects.
+        ;; Re-group survivors by block so the revocation collector sees
+        ;; the block shape it expects.
         survivor-blocks
         (->> trust-survivors
              (group-by :block)
              (mapv (fn [[block pairs]]
                      (assoc block :assertions (mapv :assertion pairs)))))
-        rev-set (collect-revocations survivor-blocks (:revocation-src ctx))
+        rev-set (revocation/collect-all survivor-blocks (:revocation-src ctx))
 
         ;; Pass 6: expand surviving assertions, dropping revoked ones
         {facts :facts rejected-rev :rejected}
@@ -309,7 +273,7 @@
          (fn [acc vb]
            (reduce
             (fn [acc2 a]
-              (if (revoked? rev-set (:sayer vb) a)
+              (if (revocation/revoked? rev-set (:sayer vb) a)
                 (update acc2 :rejected conj
                         {:reason :revoked :sayer (:sayer vb) :id (:id a)})
                 (update acc2 :facts conj
