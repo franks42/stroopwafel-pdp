@@ -210,7 +210,8 @@ The three-layer separation from the schema doc is visible in the context:
 
    Options:
      :not-before  — epoch-ms (default: signing timestamp)
-     :not-after   — epoch-ms (REQUIRED — see §5 below)
+     :not-after   — epoch-ms (optional; defaults to no upper bound — see §5)
+                    Use :forever or nil to explicitly mark eternal assertions.
      :assertions  — vector of assertion maps from (assertion ...)
 
    Returns a signet signed envelope."
@@ -269,62 +270,108 @@ The survivors go into the Datalog store as facts (alongside injected
 hybrid mode). Templates derive clean predicates; the policy query joins
 on those.
 
-## 5. Temporal defaults — the hard design question
+## 5. Temporal defaults
 
-**`:not-before` default:** signing timestamp, derived from the envelope's
-UUIDv7 `:request-id` (no extra work — signet already embeds this). Obvious,
-no debate.
+Simple rules, one default each:
 
-**`:not-after` default:** genuinely difficult. Options under discussion:
+- **`:not-before` defaults to signing-ts** — the UUIDv7 timestamp signet
+  already embeds in `:request-id`. Defaulting the lower bound is safe:
+  getting it wrong only means the assertion is usable slightly earlier
+  than intended, never longer.
 
-1. **No default, hard-require explicit `:not-after`.** Matches the schema
-   doc's stance. Safest; no eternal assertions by accident. Forces every
-   issuer to make a deliberate choice.
-2. **Short default (e.g., 1 hour) with warning.** Like JWT access tokens.
-   Silently breaks legitimate longer-lived cases.
-3. **Configurable default per context.** E.g., `(sign-block kp block {:default-ttl (hours 24)})`.
-   Still a hidden default, just moved.
-4. **Type-specific defaults.** `:revocation` defaults to "effectively
-   forever"; other types require explicit `:not-after`. Subtle but
-   defensible: revocations have inverted expiry semantics.
+- **`:not-after` defaults to no upper bound** (infinity). If the issuer
+  doesn't specify an expiry, the block is valid indefinitely. This
+  matches Biscuit's behavior and JWT's optional `exp` — it's the honest
+  version of what most real-world capability systems do.
 
-Per-type nuance for `:revocation`: a revocation assertion that expires
-stops blocking the revoked item once it expires. That's almost never
-what you want — revocations are intended to be near-permanent. So for
-revocations, a large default (signing-ts + ~100 years, or a sentinel) is
-both safer and more ergonomic than requiring every revocation issuer to
-pick a giant number.
+- **No type-specific rules.** `:capability`, `:name-binding`,
+  `:delegation`, `:revocation`, custom types — all treated identically.
 
-**Proposal (subject to confirmation):** combine #1 and type-specific #4.
+- **No hard-require at sign-time.** `sign-block` accepts blocks without
+  `:not-after` and signs them as stated. A library that throws here
+  would just cause users to write `Long/MAX_VALUE` to shut it up —
+  same semantics, more noise.
 
-- For `:capability`, `:name-binding`, `:delegation`, and all custom
-  types: **`:not-after` is required.** `sign-block` throws if omitted.
-  The error message should suggest a concrete value and a rationale
-  (e.g., "8 hours for interactive sessions, 24 hours for background
-  agents, 30 days for service-to-service trust").
-- For `:revocation`: **`:not-after` defaults to signing-ts + 100 years**
-  if omitted. Effectively permanent, but still finite (no Long/MAX_VALUE
-  sentinel — revocations *will* eventually age out, just not on any
-  timescale you'll notice).
+- **Discipline lives in the lint layer**, not the runtime. See §5.1.
 
-This keeps the schema doc's "no eternal assertions" discipline for the
-types where eternity is dangerous, while handling the one type where
-near-eternity is the right default. *Open question: does the community
-want this type-specific behavior, or hard-require for everything?*
+### 5.1 Lint enforcement (Phase 7, deferred)
 
-**Alternative worth considering:** a convenience `sign-block-with-ttl`
-that takes a `:ttl` in seconds and computes `:not-after = signing-ts + ttl`.
-Both values are visible at the call site — no hidden magic — and the
-ergonomics are good:
+A clj-kondo hook (or small custom linter) matches `sign-block` calls
+and flags missing `:not-after` at development time:
 
-```clojure
-(spki/sign-block-with-ttl root-kp
-  {:ttl        (* 24 60 60)         ; 24 hours, explicit at call site
-   :assertions [...]})
+```
+[alpaca/auth.clj:42:3]  warning  sign-block is missing :not-after
+                                 → assertion will never expire.
+                                 Use :not-after :forever to suppress.
 ```
 
-This doesn't replace the mandatory-not-after rule for `sign-block`, but
-gives a pleasant front door.
+Explicit eternity opt-in: `:not-after :forever` (or `:not-after nil`) is
+treated identically at runtime but quiets the lint — the user has made
+the choice visibly. The lint can also flag suspiciously large literals
+(e.g., `(+ now (* 100 365 86400 1000))` — "did you mean `:forever`?")
+to catch the cargo-culting that produces weird numbers.
+
+Phase 1 ships without the lint. Phase 7+ adds it once there are enough
+real `sign-block` calls in downstream code to make it valuable. Until
+then, the README documents the default: **assertions default to never
+expiring; set `:not-after` to limit the window.**
+
+### 5.2 Verifier-side cap (optional)
+
+Verifiers that don't want to honor eternal or long-lived blocks can
+cap the effective `:not-after` at `decide` time:
+
+```clojure
+(pdp/decide ctx
+  :max-block-ttl-ms (* 60 60 1000)   ; honor blocks for at most 1 hour
+  :policies [...])
+```
+
+When set, the pre-filter treats any block's effective `:not-after` as
+`min(block.not-after, signing-ts + max-block-ttl-ms)`. Verifiers can
+only tighten; never loosen. This is the "hostile token issuer" defense
+— a verifier doesn't have to trust that the issuer made a sensible
+choice, and can enforce its own risk tolerance unilaterally.
+
+Default: no cap. Verifiers that don't care about bounded trust set
+nothing. This is an opt-in conservative feature, not a load-bearing
+piece of the design.
+
+### 5.3 Rationale (why default to infinity instead of hard-require)
+
+The earlier draft of this section proposed hard-requiring `:not-after`
+on every `sign-block` call, matching the schema doc's "no hidden
+defaults" thesis. We rejected that in favor of infinity default after
+working through the tradeoffs:
+
+1. **Hard-require produces cargo-culted defaults anyway.** Every test,
+   every example, every quick experiment that doesn't want an expiry
+   writes `Long/MAX_VALUE` or `(+ now (* 100 365 86400 1000))` to
+   satisfy the library. The hidden default re-emerges in user code,
+   just with more noise.
+2. **Precedent.** Biscuit, JWT, SPKI itself — expiry is conventionally
+   optional. Capability libraries that hard-require expiry are the
+   exception, not the rule.
+3. **Separation of concerns.** Runtime library = correct mechanism.
+   Lint tool = discipline enforcement. Conflating the two forces the
+   library to encode opinions about how assertions *should* be used,
+   which is outside its responsibility.
+4. **Revocation is the honest lifetime-management mechanism.** For
+   assertions that genuinely should be bounded, the issuer picks an
+   explicit `:not-after`. For assertions whose lifetime is managed
+   out-of-band (enterprise directory, human review, compromise
+   response), revocation handles reduction. Forcing a timestamp onto
+   every assertion conflates "when does this expire" with "how do we
+   stop trusting it."
+5. **Anything more complicated was worse.** Type-specific defaults,
+   signed default-policies, query-time parameter defaults — all
+   examined, all traded real simplicity for marginal safety. A lint
+   tool captures the same benefit with none of the complexity.
+
+The cost of this choice is real: a careless issuer can produce eternal
+assertions. We accept that cost and manage it via (a) explicit
+documentation, (b) Phase-7 lint tooling, (c) verifier-side caps for
+services that need defense-in-depth.
 
 ## 6. Standard templates
 
@@ -391,6 +438,20 @@ Three scopes:
 - `[:revocation :subject <name>]` — middle (all assertions about this
   subject, regardless of issuer). The incident-response sweet spot.
 
+**Revocation is load-bearing in this design.** Because `:not-after`
+defaults to infinity (§5), services issuing long-lived or never-expiring
+assertions rely on revocation as the primary mechanism for reducing an
+already-issued block's trust duration. A deployment that uses infinity
+default `:not-after` without operational revocation infrastructure is
+choosing eternal trust — probably not what was intended. Services
+should invest in revocation infrastructure proportional to the lifetime
+of the assertions they issue:
+
+- Short-lived assertions (minutes, hours): revocation is a nice-to-have
+- Medium-lived assertions (days, weeks): revocation should work
+- Long-lived or eternal assertions: revocation is mandatory for
+  production use
+
 ## 8. Delegation + trust closure
 
 `resolve-trust-closure` computes the set of trusted sayers via fixpoint:
@@ -444,44 +505,59 @@ it's a follow-up design.
 For now: `stroopwafel.pdp.core` stays the Biscuit-shaped PDP;
 `stroopwafel.pdp.spki.core` is the SPKI/SDSI PDP; callers pick one.
 
-## 11. Open questions needing a decision
+## 11. Open questions and pinned decisions
 
-1. **Not-after default** (the big one): hard-require for all types, or
-   type-specific with near-eternity default for `:revocation`? See §5.
-   *Proposal: type-specific.*
+### Pinned decisions (closed)
 
-2. **Assertion-id format:** UUIDv7 (simple, time-ordered, matches signet's
+- **Not-after default:** infinity (no upper bound) when not specified.
+  No type-specific rules, no hard-require, no signed default policy,
+  no query-time default. Discipline lives in a future lint tool (§5.1).
+  Verifiers can cap from above via `:max-block-ttl-ms` (§5.2).
+
+- **Not-before default:** signing-ts. Safe to default because getting
+  it wrong only widens validity at the start, never at the end.
+
+- **Per-assertion temporal fields:** none. The block is the unit of
+  validity. Assertions needing different windows go in different blocks.
+
+- **Statement encoding:** inline / flattened. The assertion type
+  keyword at position 4 discriminates; positions 6+ are type-specific.
+  No nested `[:capability ...]` wrapper.
+
+### Still open
+
+1. **Assertion-id format:** UUIDv7 (simple, time-ordered, matches signet's
    `:request-id`) or content hash (deterministic, dedup-friendly)?
    *Proposal: UUIDv7 now; content-hash later if dedup turns up as a real
    need.*
 
-3. **Revocation source return shape:**
+2. **Revocation source return shape:**
    `{:ids #{…} :keys #{…} :subjects #{…}}` (three sets) or a single
    tagged set `#{[:id x] [:key y] [:subject z]}`?
    *Proposal: three sets, clearer intent and faster lookups.*
 
-4. **Templates registry scope:** per-context (explicit `with-templates`)
+3. **Templates registry scope:** per-context (explicit `with-templates`)
    or global default? *Proposal: per-context. One extra line at the call
    site beats one hidden default for decades.*
 
-5. **Clock skew symmetry:** symmetric by default, or asymmetric (lenient
+4. **Clock skew symmetry:** symmetric by default, or asymmetric (lenient
    not-before, strict not-after)? *Proposal: symmetric by default. Expose
    asymmetric params if someone needs them later.*
 
-6. **Pre-filter rejection surfacing:** invalid assertions as `:errors`
+5. **Pre-filter rejection surfacing:** invalid assertions as `:errors`
    (short-circuit decide) or silent-with-explain (decide proceeds, drops
    visible in `:explain`)? *Proposal: silent + `:explain`. An invalid
    assertion shouldn't deny a request that would otherwise be allowed by
    other valid assertions. That's the SPKI/SDSI compositionality win
    over Biscuit chains.*
 
-7. **Primordial trust-root overlap with delegation:** if root A delegates
+6. **Primordial trust-root overlap with delegation:** if root A delegates
    to B, and B is already a primordial trust-root, what's B's effective
    scope? *Proposal: widen — take the union of primordial and delegated
    scopes (max window, max scope). Primordial is a "floor" that
    delegation can only raise, never lower.*
 
-8. **Block-signing key vs assertion subject constraint:** should the
+7. **Block-signing key vs assertion subject constraint:** should the
    sayer be constrained at all? (Can a random key sign a block asserting
    "alice is in ops-team"?) *Proposal: no constraint. Trust-closure is
    the only gatekeeper; sayer is just an identity. This is the SPKI
