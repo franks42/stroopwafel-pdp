@@ -17,7 +17,8 @@
 
    See docs/assertion-api-proposal.md for the full design."
   (:require [stroopwafel.core :as engine]
-            [stroopwafel.pdp.spki.assertion :as assertion]))
+            [stroopwafel.pdp.spki.assertion :as assertion]
+            [stroopwafel.pdp.spki.trust :as trust]))
 
 ;; ---------------------------------------------------------------------------
 ;; Context constructor
@@ -61,19 +62,48 @@
   add-assertions)
 
 (defn add-trust-roots
-  "Register primordial trust-root sayer kids. Accepts a kid URN
-   string, a set/sequence of strings.
+  "Register primordial trust-root sayers.
 
-   Phase 2: flat set, no scoping.
-   Phase 3: will extend to scoped trust maps with delegation."
+   Accepts:
+     - a kid URN string — trusted for :all assertion types, forever
+     - a set/sequence of kid URN strings — same
+     - a map {kid → {:for-types <:all or set> :not-after <epoch-ms or nil>}}
+       — scoped primordial trust
+
+   Primordial trust is a floor: delegation can only raise a primordial
+   root's effective scope (pinned decision §11 #6), never narrow it.
+   Multiple calls accumulate.
+
+   The context stores trust-roots as either a set of strings (simple
+   case) or a map (scoped case); both forms are accepted by the trust
+   closure at decide time."
   [ctx roots]
-  (update ctx :trust-roots into
-          (cond
-            (string? roots)     [roots]
-            (set? roots)        roots
-            (sequential? roots) roots
-            :else (throw (ex-info "trust-roots must be a kid URN, set, or sequence"
-                                  {:got roots})))))
+  (cond
+    (string? roots)
+    (update ctx :trust-roots
+            (fn [existing]
+              (if (map? existing)
+                (assoc existing roots {:for-types :all :not-after nil})
+                (conj (or existing #{}) roots))))
+
+    (map? roots)
+    (update ctx :trust-roots
+            (fn [existing]
+              (merge (if (map? existing)
+                       existing
+                       ;; Promote an existing set to a map form so we
+                       ;; can merge in the new scoped entries without
+                       ;; losing earlier unscoped entries.
+                       (into {} (map #(vector % {:for-types :all :not-after nil})
+                                     (or existing #{}))))
+                     roots)))
+
+    (or (set? roots) (sequential? roots))
+    (reduce add-trust-roots ctx roots)
+
+    :else
+    (throw (ex-info "trust-roots must be a kid URN, set/seq, or map"
+                    {:got roots}))))
 
 (defn with-templates
   "Register derivation templates. These are Datalog rules that unpack
@@ -190,57 +220,90 @@
         (:statement a)))
 
 (defn- pre-filter
-  "Run passes 1–5 on the raw signed blocks in the context.
+  "Run the full pipeline on the raw signed blocks in the context.
 
    Pass 1: signature verification (drops invalid sigs)
-   Pass 2: trust filter (Phase 2: flat primordial set)
-   Pass 3: temporal filter (with :max-block-ttl-ms verifier cap)
-   Pass 4: collect revocation set (in-band + out-of-band)
-   Pass 5: filter assertions by revocation + expand to flat facts
+   Pass 2: temporal filter (with :max-block-ttl-ms verifier cap)
+   Pass 3: resolve trust closure from primordial + delegation
+   Pass 4: per-assertion trust check — a block's sayer may be trusted
+           for some assertion types but not others
+   Pass 5: collect revocation set (in-band + out-of-band) from
+           trust-filtered assertions
+   Pass 6: drop revoked assertions + expand to flat facts
+
+   Note the ordering change from Phase 2: temporal filter runs BEFORE
+   trust filter so that expired delegation blocks don't contribute to
+   the trust closure. And trust is now per-assertion, not per-block,
+   because a delegated sayer may be trusted for some types but not
+   others.
 
    Returns {:facts [...] :rejected [...]}."
   [ctx max-block-ttl-ms]
   (let [now   ((:current-time-fn ctx))
         skew  (:clock-skew-ms ctx)
         roots (:trust-roots ctx)
+
         ;; Pass 1: signature verification
-        verified
+        {verified :verified rejected-sig :rejected}
         (reduce
          (fn [acc signed-block]
            (let [r (assertion/verify-block signed-block)]
              (if (:valid? r)
                (update acc :verified conj r)
-               (update acc :rejected conj
-                       {:reason :invalid-signature :block signed-block}))))
+               (update acc :rejected conj {:reason :invalid-signature}))))
          {:verified [] :rejected []}
          (:assertions ctx))
-        ;; Pass 2: trust filter (flat primordial set — Phase 2)
-        {trusted true untrusted false}
-        (group-by #(contains? roots (:sayer %)) (:verified verified))
-        rejected-untrusted
-        (mapv #(hash-map :reason :untrusted-sayer :sayer (:sayer %)) untrusted)
-        ;; Pass 3: temporal filter (with verifier cap)
-        {temporally-valid true temporally-invalid false}
-        (group-by
-         (fn [vb]
-           (let [na-eff (effective-not-after (:not-after vb)
-                                             (:signing-ts vb)
-                                             max-block-ttl-ms)]
-             (temporally-valid? (:not-before vb) na-eff now skew)))
-         (or trusted []))
-        rejected-temporal
-        (mapv #(hash-map :reason :temporally-invalid :sayer (:sayer %)) temporally-invalid)
-        ;; Attach the effective-not-after to each surviving block
+
+        ;; Pass 2: temporal filter (with verifier cap)
         valid-blocks
-        (mapv (fn [vb]
-                (assoc vb :effective-not-after
-                       (effective-not-after (:not-after vb)
-                                            (:signing-ts vb)
-                                            max-block-ttl-ms)))
-              (or temporally-valid []))
-        ;; Pass 4: collect revocation set from valid blocks + external
-        rev-set (collect-revocations valid-blocks (:revocation-src ctx))
-        ;; Pass 5: expand surviving assertions, dropping revoked ones
+        (for [vb verified
+              :let [na-eff (effective-not-after (:not-after vb)
+                                                (:signing-ts vb)
+                                                max-block-ttl-ms)]
+              :when (temporally-valid? (:not-before vb) na-eff now skew)]
+          (assoc vb :effective-not-after na-eff))
+        rejected-temporal
+        (for [vb verified
+              :let [na-eff (effective-not-after (:not-after vb)
+                                                (:signing-ts vb)
+                                                max-block-ttl-ms)]
+              :when (not (temporally-valid? (:not-before vb) na-eff now skew))]
+          {:reason :temporally-invalid :sayer (:sayer vb)})
+
+        ;; Pass 3: resolve trust closure (primordial + delegation fixpoint)
+        trust-entries (trust/resolve roots valid-blocks now skew)
+
+        ;; Pass 4: per-assertion trust check.
+        ;; An assertion survives iff its block's sayer is trusted for
+        ;; that assertion's type at 'now'. Silent drop per §11 decision.
+        {trust-survivors :facts rejected-trust :rejected}
+        (reduce
+         (fn [acc vb]
+           (reduce
+            (fn [acc2 a]
+              (if (trust/trusted-for? trust-entries (:sayer vb) (:type a) now skew)
+                (update acc2 :facts conj {:block vb :assertion a})
+                (update acc2 :rejected conj
+                        {:reason :untrusted-for-type
+                         :sayer  (:sayer vb)
+                         :type   (:type a)
+                         :id     (:id a)})))
+            acc
+            (:assertions vb)))
+         {:facts [] :rejected []}
+         valid-blocks)
+
+        ;; Pass 5: collect revocation set from trust-filtered assertions.
+        ;; Re-group survivors by block so collect-revocations sees the
+        ;; block shape it expects.
+        survivor-blocks
+        (->> trust-survivors
+             (group-by :block)
+             (mapv (fn [[block pairs]]
+                     (assoc block :assertions (mapv :assertion pairs)))))
+        rev-set (collect-revocations survivor-blocks (:revocation-src ctx))
+
+        ;; Pass 6: expand surviving assertions, dropping revoked ones
         {facts :facts rejected-rev :rejected}
         (reduce
          (fn [acc vb]
@@ -258,12 +321,10 @@
             acc
             (:assertions vb)))
          {:facts [] :rejected []}
-         valid-blocks)]
+         survivor-blocks)]
     {:facts    facts
-     :rejected (into (into (into (:rejected verified)
-                                 rejected-untrusted)
-                           rejected-temporal)
-                     rejected-rev)}))
+     :rejected (vec (concat rejected-sig rejected-temporal
+                            rejected-trust rejected-rev))}))
 
 ;; ---------------------------------------------------------------------------
 ;; Decide

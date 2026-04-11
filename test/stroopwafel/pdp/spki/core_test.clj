@@ -385,8 +385,8 @@
                     :explain? true))]
     (is (:allowed? result))
     (is (contains? result :rejected))
-    (is (some #(= :untrusted-sayer (:reason %)) (:rejected result))
-        "The rogue block is in :rejected with :untrusted-sayer")))
+    (is (some #(= :untrusted-for-type (:reason %)) (:rejected result))
+        "The rogue block's assertion is in :rejected with :untrusted-for-type")))
 
 (deftest silent-drop-does-not-fail-otherwise-valid-request
   (testing "one bad assertion does not sink a request another valid assertion would allow"
@@ -407,6 +407,119 @@
 ;; ---------------------------------------------------------------------------
 ;; Invalid signatures
 ;; ---------------------------------------------------------------------------
+
+;; ---------------------------------------------------------------------------
+;; Delegation (Phase 3 integration)
+;; ---------------------------------------------------------------------------
+
+(deftest delegation-allows-delegate-to-issue-capabilities
+  (testing "root delegates :capability to intermediary, intermediary signs
+            a capability, the capability is honored"
+    (let [intermediary-kp  (key/signing-keypair)
+          intermediary-kid (key/kid intermediary-kp)
+          delegation-block
+          (a/sign-block root-kp
+                        {:assertions [(a/assertion :delegation
+                                                   [intermediary-kid :capability])]})
+          capability-block
+          (cap-block intermediary-kp "alice" :read "/data")
+          result (-> (spki/context)
+                     (spki/add-trust-roots root-kid)
+                     (spki/with-templates [capability-template])
+                     (spki/add-assertions delegation-block)
+                     (spki/add-assertions capability-block)
+                     (spki/decide
+                      :policies [{:kind :allow
+                                  :query [[:can "alice" :read "/data"]]}]))]
+      (is (:allowed? result)))))
+
+(deftest delegation-scope-limits-delegate
+  (testing "root delegates only :name-binding to intermediary;
+            intermediary's :capability assertion should be dropped"
+    (let [intermediary-kp  (key/signing-keypair)
+          intermediary-kid (key/kid intermediary-kp)
+          delegation-block
+          (a/sign-block root-kp
+                        {:assertions [(a/assertion :delegation
+                                                   [intermediary-kid :name-binding])]})
+          capability-block
+          (cap-block intermediary-kp "alice" :read "/data")
+          result (-> (spki/context)
+                     (spki/add-trust-roots root-kid)
+                     (spki/with-templates [capability-template])
+                     (spki/add-assertions delegation-block)
+                     (spki/add-assertions capability-block)
+                     (spki/decide
+                      :policies [{:kind :allow
+                                  :query [[:can "alice" :read "/data"]]}]
+                      :explain? true))]
+      (is (not (:allowed? result)))
+      (is (some #(= :untrusted-for-type (:reason %)) (:rejected result))))))
+
+(deftest expired-delegation-block-does-not-contribute-trust
+  (testing "root's delegation block is expired; intermediary's fresh
+            capability is dropped for untrusted-for-type"
+    (let [intermediary-kp  (key/signing-keypair)
+          intermediary-kid (key/kid intermediary-kp)
+          delegation-block
+          (a/sign-block root-kp
+                        {:not-after  (- (System/currentTimeMillis) 60000)
+                         :assertions [(a/assertion :delegation
+                                                   [intermediary-kid :all])]})
+          capability-block
+          (cap-block intermediary-kp "alice" :read "/data")
+          result (-> (spki/context)
+                     (spki/add-trust-roots root-kid)
+                     (spki/with-templates [capability-template])
+                     (spki/add-assertions delegation-block)
+                     (spki/add-assertions capability-block)
+                     (spki/decide
+                      :policies [{:kind :allow
+                                  :query [[:can "alice" :read "/data"]]}]))]
+      (is (not (:allowed? result))))))
+
+(deftest two-hop-delegation-integration
+  (testing "root → ops-lead → alice-kp; alice-kp signs a capability"
+    (let [ops-lead-kp  (key/signing-keypair)
+          ops-lead-kid (key/kid ops-lead-kp)
+          alice-kp     (key/signing-keypair)
+          alice-kid    (key/kid alice-kp)
+          dg-1 (a/sign-block root-kp
+                             {:assertions [(a/assertion :delegation
+                                                        [ops-lead-kid :all])]})
+          dg-2 (a/sign-block ops-lead-kp
+                             {:assertions [(a/assertion :delegation
+                                                        [alice-kid :capability])]})
+          cap  (cap-block alice-kp "bob" :read "/data")
+          result (-> (spki/context)
+                     (spki/add-trust-roots root-kid)
+                     (spki/with-templates [capability-template])
+                     (spki/add-assertions dg-1)
+                     (spki/add-assertions dg-2)
+                     (spki/add-assertions cap)
+                     (spki/decide
+                      :policies [{:kind :allow
+                                  :query [[:can "bob" :read "/data"]]}]))]
+      (is (:allowed? result)))))
+
+(deftest unrelated-delegation-has-no-effect
+  (testing "a block from an untrusted sayer containing a delegation
+            cannot grant trust to its target"
+    (let [rogue-delegate-kp  (key/signing-keypair)
+          rogue-delegate-kid (key/kid rogue-delegate-kp)
+          dg (a/sign-block other-kp  ; other-kp is NOT a trust root
+                           {:assertions [(a/assertion :delegation
+                                                      [rogue-delegate-kid :all])]})
+          cap (cap-block rogue-delegate-kp "mallory" :read "/data")
+          result (-> (spki/context)
+                     (spki/add-trust-roots root-kid)   ; only root trusted
+                     (spki/with-templates [capability-template])
+                     (spki/add-assertions dg)
+                     (spki/add-assertions cap)
+                     (spki/decide
+                      :policies [{:kind :allow
+                                  :query [[:can "mallory" :read "/data"]]}]))]
+      (is (not (:allowed? result))))))
 
 (deftest tampered-block-silently-dropped
   (let [block     (cap-block root-kp "alice" :read "/data")
