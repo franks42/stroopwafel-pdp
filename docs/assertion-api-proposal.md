@@ -379,45 +379,64 @@ Shipped as `stroopwafel.pdp.spki.templates/standard`:
 
 ```clojure
 (def standard
-  '[;; :capability → [:can ?subject ?action ?resource]
+  '[;; :capability (3-arity) → [:can ?subject ?action ?resource]
     {:id   :tmpl/capability
      :head [:can ?subject ?action ?resource]
-     :body [[?_ ?_ ?_ ?_ :capability ?_ ?subject ?action ?resource]]}
+     :body [[?_sayer ?_ts ?_nb ?_na :capability ?_id ?subject ?action ?resource]]}
 
     ;; :capability with constraints map
     {:id   :tmpl/capability-constrained
      :head [:can ?subject ?action ?resource ?constraints]
-     :body [[?_ ?_ ?_ ?_ :capability ?_ ?subject ?action ?resource ?constraints]]}
+     :body [[?_sayer ?_ts ?_nb ?_na :capability ?_id
+             ?subject ?action ?resource ?constraints]]}
 
     ;; :name-binding → [:named ?key ?name]
     {:id   :tmpl/name-binding
      :head [:named ?key ?name]
-     :body [[?_ ?_ ?_ ?_ :name-binding ?_ ?key ?name]]}
+     :body [[?_sayer ?_ts ?_nb ?_na :name-binding ?_id ?key ?name]]}
+
+    ;; :delegation → [:delegated ?delegator ?delegate ?type]
+    ;; The sayer IS the delegator; exposed as ?delegator in the head.
+    {:id   :tmpl/delegation
+     :head [:delegated ?delegator ?delegate ?type]
+     :body [[?delegator ?_ts ?_nb ?_na :delegation ?_id ?delegate ?type]]}
 
     ;; :revocation by assertion id
     {:id   :tmpl/revoked-assertion
-     :head [:revoked ?id]
-     :body [[?_ ?_ ?_ ?_ :revocation ?_ :assertion ?id]]}
+     :head [:revoked-assertion ?target]
+     :body [[?_sayer ?_ts ?_nb ?_na :revocation ?_id :assertion ?target]]}
 
     ;; :revocation by sayer key
     {:id   :tmpl/revoked-key
-     :head [:revoked-key ?k]
-     :body [[?_ ?_ ?_ ?_ :revocation ?_ :key ?k]]}
+     :head [:revoked-key ?target]
+     :body [[?_sayer ?_ts ?_nb ?_na :revocation ?_id :key ?target]]}
 
     ;; :revocation by subject
     {:id   :tmpl/revoked-subject
-     :head [:revoked-subject ?s]
-     :body [[?_ ?_ ?_ ?_ :revocation ?_ :subject ?s]]}
-
-    ;; :delegation → [:delegated ?delegator ?delegate ?type ?scope]
-    {:id   :tmpl/delegation
-     :head [:delegated ?delegator ?delegate ?type ?scope]
-     :body [[?delegator ?_ ?_ ?_ :delegation ?_ ?delegate ?type ?scope]]}])
+     :head [:revoked-subject ?target]
+     :body [[?_sayer ?_ts ?_nb ?_na :revocation ?_id :subject ?target]]}])
 ```
 
 Policy authors never see positional details — they write queries against
 `[:can …]`, `[:named …]`, `[:delegated …]`. Raw fact matching still works
 for anyone who wants it; templates are conventions, not constraints.
+
+### ⚠ Variable-naming caveat (do NOT use `?_` as a wildcard)
+
+Stroopwafel's Datalog treats every variable-named occurrence as a real
+variable. Repeating `?_` in a single rule body — e.g.,
+`[[?_ ?_ ?_ ?_ :capability ?_ ?subject ?action ?resource]]` — forces
+all five `?_` positions to **unify** with the same value, which means
+the template matches nothing unless the sayer, timestamp, not-before,
+not-after, and assertion-id all happen to be equal. That's never true,
+so the template silently never fires.
+
+Always give each ignored position a **unique** variable name. The
+`?_`-prefix convention (`?_sayer`, `?_ts`, `?_nb`, `?_na`, `?_id`) is
+ergonomic — it signals "present in body, unused in head" without
+colliding on the same binding. Raw underscores are forbidden. This
+bit us during Phase 2 bring-up and the standard templates above are
+the fixed shape.
 
 ## 7. Revocation
 
