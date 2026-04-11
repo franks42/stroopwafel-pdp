@@ -505,63 +505,71 @@ it's a follow-up design.
 For now: `stroopwafel.pdp.core` stays the Biscuit-shaped PDP;
 `stroopwafel.pdp.spki.core` is the SPKI/SDSI PDP; callers pick one.
 
-## 11. Open questions and pinned decisions
+## 11. Pinned decisions
 
-### Pinned decisions (closed)
+All Phase-1 design questions are resolved. Implementation can proceed.
 
-- **Not-after default:** infinity (no upper bound) when not specified.
-  No type-specific rules, no hard-require, no signed default policy,
-  no query-time default. Discipline lives in a future lint tool (§5.1).
-  Verifiers can cap from above via `:max-block-ttl-ms` (§5.2).
+### Temporal & structural
 
-- **Not-before default:** signing-ts. Safe to default because getting
-  it wrong only widens validity at the start, never at the end.
+- **`:not-after` default:** infinity (no upper bound). No type-specific
+  rules, no hard-require, no signed default policy, no query-time
+  default. Discipline lives in a future lint tool (§5.1). Verifiers can
+  cap from above via `:max-block-ttl-ms` (§5.2).
+
+- **`:not-before` default:** signing-ts (from the envelope's UUIDv7
+  `:request-id`). Safe to default because widening the start only makes
+  the assertion usable slightly earlier, never longer.
 
 - **Per-assertion temporal fields:** none. The block is the unit of
   validity. Assertions needing different windows go in different blocks.
 
-- **Statement encoding:** inline / flattened. The assertion type
-  keyword at position 4 discriminates; positions 6+ are type-specific.
-  No nested `[:capability ...]` wrapper.
+- **Statement encoding:** inline / flattened. The assertion-type keyword
+  at position 4 discriminates; positions 6+ are type-specific. No nested
+  `[:capability ...]` wrapper inside the tuple.
 
-### Still open
+### Identity & revocation
 
-1. **Assertion-id format:** UUIDv7 (simple, time-ordered, matches signet's
-   `:request-id`) or content hash (deterministic, dedup-friendly)?
-   *Proposal: UUIDv7 now; content-hash later if dedup turns up as a real
-   need.*
+- **Assertion-id format:** UUIDv7. Simple, time-ordered, matches signet's
+  existing `:request-id`. Content-hash as a future option if
+  deduplication turns up as a real need.
 
-2. **Revocation source return shape:**
-   `{:ids #{…} :keys #{…} :subjects #{…}}` (three sets) or a single
-   tagged set `#{[:id x] [:key y] [:subject z]}`?
-   *Proposal: three sets, clearer intent and faster lookups.*
+- **Revocation source return shape:** three sets —
+  `{:ids #{...} :keys #{...} :subjects #{...}}`. Clearer intent at the
+  call site and faster set-lookup than a single tagged set.
 
-3. **Templates registry scope:** per-context (explicit `with-templates`)
-   or global default? *Proposal: per-context. One extra line at the call
-   site beats one hidden default for decades.*
+- **Sayer constraints:** none. A random key can sign a block asserting
+  "alice is in ops-team"; the receiver decides whether to believe it.
+  Trust-closure (primordial roots + delegation) is the only gatekeeper.
+  This is the SPKI model in its pure form — anyone can say anything,
+  the verifier decides who to trust.
 
-4. **Clock skew symmetry:** symmetric by default, or asymmetric (lenient
-   not-before, strict not-after)? *Proposal: symmetric by default. Expose
-   asymmetric params if someone needs them later.*
+### Verification & evaluation
 
-5. **Pre-filter rejection surfacing:** invalid assertions as `:errors`
-   (short-circuit decide) or silent-with-explain (decide proceeds, drops
-   visible in `:explain`)? *Proposal: silent + `:explain`. An invalid
-   assertion shouldn't deny a request that would otherwise be allowed by
-   other valid assertions. That's the SPKI/SDSI compositionality win
-   over Biscuit chains.*
+- **Clock skew:** symmetric by default, configured via a single
+  `:clock-skew-ms` parameter on `context`. Asymmetric skew (lenient
+  on `:not-before`, strict on `:not-after`) can be added via two
+  separate parameters if a concrete use case shows up.
 
-6. **Primordial trust-root overlap with delegation:** if root A delegates
-   to B, and B is already a primordial trust-root, what's B's effective
-   scope? *Proposal: widen — take the union of primordial and delegated
-   scopes (max window, max scope). Primordial is a "floor" that
-   delegation can only raise, never lower.*
+- **Pre-filter rejection surfacing:** silent with `:explain`. A single
+  invalid/expired/revoked assertion does not short-circuit `decide` —
+  it drops out of the fact store, and the decision proceeds on what
+  remains. This is the SPKI/SDSI compositionality win over Biscuit
+  chains: one bad fact doesn't kill the whole decision. Drops are
+  visible in the `:explain` tree for debugging.
 
-7. **Block-signing key vs assertion subject constraint:** should the
-   sayer be constrained at all? (Can a random key sign a block asserting
-   "alice is in ops-team"?) *Proposal: no constraint. Trust-closure is
-   the only gatekeeper; sayer is just an identity. This is the SPKI
-   model — anyone can say anything, the receiver decides who to believe.*
+### Trust model
+
+- **Templates registry scope:** per-context. `(with-templates ctx
+  tmpl/standard)` is the usual first line after `(context)`. One
+  explicit call beats one hidden global default for decades.
+
+- **Primordial-root vs delegated trust overlap:** widen. If root A is a
+  primordial trust-root AND receives a delegation from root B (also
+  primordial), A's effective scope is the union of (its primordial
+  scope) and (the delegated scope from B). Primordial trust is a floor;
+  delegation can only raise it, never lower it. This avoids the
+  surprise of "my primordial root got narrower because someone
+  delegated to it."
 
 ## 12. Phased implementation plan
 
