@@ -536,3 +536,24 @@
                        :explain? true))]
     (is (not (:allowed? result)))
     (is (some #(= :invalid-signature (:reason %)) (:rejected result)))))
+
+;; ---------------------------------------------------------------------------
+;; Engine limits: a limit reached is a deny with its reason
+;; ---------------------------------------------------------------------------
+
+(deftest engine-limit-denies-with-reason
+  (let [ctx   (-> (spki/context)
+                  (spki/add-trust-roots root-kid)
+                  (spki/with-templates [capability-template])
+                  (spki/add-assertions (cap-block root-kp "alice" :read "/data"))
+                  (spki/add-facts (mapv (fn [i] [:edge i (inc i)]) (range 10))))
+        rules '[{:id :r1 :head [:reach ?a ?b] :body [[:edge ?a ?b]]}
+                {:id :rn :head [:reach ?a ?c] :body [[:reach ?a ?b] [:edge ?b ?c]]}]
+        pol   [{:kind :allow :query [[:can "alice" :read "/data"]]}]]
+    (testing "within the limits the capability allows"
+      (is (= {:allowed? true} (spki/decide ctx :rules rules :policies pol))))
+    (testing "a limit reached denies, and says why"
+      (let [result (spki/decide ctx :rules rules :policies pol :limits {:max-facts 30})]
+        (is (false? (:allowed? result)))
+        (is (= {:type :limit-exceeded :limit :max-facts :max 30}
+               (select-keys (:error result) [:type :limit :max])))))))

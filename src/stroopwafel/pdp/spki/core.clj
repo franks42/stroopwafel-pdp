@@ -303,12 +303,15 @@
      :checks           — extra authorizer checks
      :explain?         — include proof tree + rejected assertions
      :max-block-ttl-ms — verifier cap on block :not-after (§5.2)
+     :limits           — engine fixpoint limits (:max-iterations, :max-facts)
 
    Returns:
      {:allowed? boolean}
      or {:allowed? boolean :explain ... :rejected ...}   (explain? mode)
-     or {:allowed? false :errors [...]}                  (context errors)"
-  [ctx & {:keys [policies rules checks explain? max-block-ttl-ms]}]
+     or {:allowed? false :errors [...]}                  (context errors)
+     or {:allowed? false :error {:type :limit-exceeded ...}}
+                        (the engine reached a limit before its fixpoint)"
+  [ctx & {:keys [policies rules checks explain? max-block-ttl-ms limits]}]
   (if (seq (:errors ctx))
     {:allowed? false :errors (:errors ctx)}
     (let [{:keys [facts rejected]} (pre-filter ctx max-block-ttl-ms)
@@ -323,7 +326,9 @@
                       :policies (vec (or policies []))}
           result     (engine/evaluate token
                                       :explain?   explain?
-                                      :authorizer authorizer)]
+                                      :authorizer authorizer
+                                      :limits     limits)]
       (cond-> {:allowed? (boolean (:valid? result))}
+        (:error result) (assoc :error (:error result))
         explain? (assoc :explain  (:explain result)
                         :rejected rejected)))))

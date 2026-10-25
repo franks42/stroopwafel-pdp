@@ -19,7 +19,7 @@
   (testing "Signed chain with matching policy → allowed"
     (let [root-kp (key/signing-keypair)
           token   (-> (chain/extend root-kp
-                                    {:facts [[:capability "alice" :read "/data"]]})
+                        {:facts [[:capability "alice" :read "/data"]]})
                       (chain/close))
           result  (-> (pdp/context)
                       (pdp/add-chain token {:trust-root (key/kid root-kp)})
@@ -33,7 +33,7 @@
   (testing "Signed chain without matching capability → denied"
     (let [root-kp (key/signing-keypair)
           token   (-> (chain/extend root-kp
-                                    {:facts [[:capability "alice" :read "/data"]]})
+                        {:facts [[:capability "alice" :read "/data"]]})
                       (chain/close))
           result  (-> (pdp/context)
                       (pdp/add-chain token {:trust-root (key/kid root-kp)})
@@ -67,8 +67,8 @@
   (testing "Attenuated chain: broad capability → narrow check"
     (let [root-kp (key/signing-keypair)
           token   (-> (chain/extend root-kp
-                                    {:facts [[:capability "alice" :read "/data"]
-                                             [:capability "alice" :write "/data"]]})
+                        {:facts [[:capability "alice" :read "/data"]
+                                 [:capability "alice" :write "/data"]]})
                       ;; Attenuate: add check that only allows read
                       (chain/extend {:checks [{:id    :read-only
                                                :query [[:capability "alice" :read "/data"]]}]})
@@ -91,11 +91,11 @@
           service-kp (key/signing-keypair)
           ;; IdP asserts identity
           name-chain (-> (chain/extend idp-kp
-                                       {:facts [[:name-binding "alice-key" "ops-team"]]})
+                           {:facts [[:name-binding "alice-key" "ops-team"]]})
                          (chain/close))
           ;; Service grants capability to group
           cap-chain  (-> (chain/extend service-kp
-                                       {:facts [[:capability "ops-team" :restart "/api/service"]]})
+                           {:facts [[:capability "ops-team" :restart "/api/service"]]})
                          (chain/close))
           ;; PDP combines both
           result (-> (pdp/context)
@@ -103,9 +103,9 @@
                      (pdp/add-chain cap-chain {:trust-root (key/kid service-kp)})
                      (pdp/decide
                       :rules '[{:id   :resolve-name
-                               :head [:authorized ?key ?action ?resource]
-                               :body [[:name-binding ?key ?name]
-                                      [:capability ?name ?action ?resource]]}]
+                                :head [:authorized ?key ?action ?resource]
+                                :body [[:name-binding ?key ?name]
+                                       [:capability ?name ?action ?resource]]}]
                       :policies [{:kind :allow
                                   :query [[:authorized "alice-key" :restart "/api/service"]]}]))]
       (is (:allowed? result)))))
@@ -120,8 +120,8 @@
           agent-kp (key/signing-keypair)
           ;; Token grants capability to this agent's kid
           token (-> (chain/extend root-kp
-                                  {:facts [[:authorized-agent (key/kid agent-kp)]
-                                           [:capability :read "/data"]]})
+                      {:facts [[:authorized-agent (key/kid agent-kp)]
+                               [:capability :read "/data"]]})
                     (chain/close))
           ;; Agent signs the request
           envelope (sign/sign-edn agent-kp {:method :get :path "/data"})
@@ -131,9 +131,9 @@
                      (pdp/add-signed-envelope envelope)
                      (pdp/decide
                       :rules '[{:id   :agent-bound
-                               :head [:agent-can-act ?kid]
-                               :body [[:authorized-agent ?kid]
-                                      [:request-verified-signer ?kid]]}]
+                                :head [:agent-can-act ?kid]
+                                :body [[:authorized-agent ?kid]
+                                       [:request-verified-signer ?kid]]}]
                       :policies [{:kind :allow
                                   :query [[:agent-can-act '?k]
                                           [:capability :read "/data"]]}]))]
@@ -145,8 +145,8 @@
           agent-kp (key/signing-keypair)
           rogue-kp (key/signing-keypair)
           token (-> (chain/extend root-kp
-                                  {:facts [[:authorized-agent (key/kid agent-kp)]
-                                           [:capability :read "/data"]]})
+                      {:facts [[:authorized-agent (key/kid agent-kp)]
+                               [:capability :read "/data"]]})
                     (chain/close))
           ;; Rogue signs instead of authorized agent
           envelope (sign/sign-edn rogue-kp {:method :get :path "/data"})
@@ -155,9 +155,9 @@
                      (pdp/add-signed-envelope envelope)
                      (pdp/decide
                       :rules '[{:id   :agent-bound
-                               :head [:agent-can-act ?kid]
-                               :body [[:authorized-agent ?kid]
-                                      [:request-verified-signer ?kid]]}]
+                                :head [:agent-can-act ?kid]
+                                :body [[:authorized-agent ?kid]
+                                       [:request-verified-signer ?kid]]}]
                       :policies [{:kind :allow
                                   :query [[:agent-can-act '?k]]}]))]
       (is (not (:allowed? result))))))
@@ -172,7 +172,7 @@
           idp-kp  (key/signing-keypair)
           ;; Root issues capability for ops-team
           token (chain/extend root-kp
-                              {:facts [[:capability "ops-team" :restart "/api/service"]]})
+                  {:facts [[:capability "ops-team" :restart "/api/service"]]})
           ;; IdP signs a name-binding assertion for this chain
           request  (chain/third-party-request token)
           tp-block (chain/create-third-party-block
@@ -188,9 +188,9 @@
                      (pdp/decide
                       :trusted-external-keys [(key/kid idp-kp)]
                       :rules '[{:id   :resolve
-                               :head [:authorized ?key ?action ?resource]
-                               :body [[:name-binding ?key ?name]
-                                      [:capability ?name ?action ?resource]]}]
+                                :head [:authorized ?key ?action ?resource]
+                                :body [[:name-binding ?key ?name]
+                                       [:capability ?name ?action ?resource]]}]
                       :policies [{:kind :allow
                                   :query [[:authorized "alice-key" :restart "/api/service"]]}]))]
       (is (:allowed? result)))))
@@ -243,3 +243,32 @@
                       :policies [{:kind :allow
                                   :query [[:capability "alice" :read "/data"]]}]))]
       (is (:allowed? result)))))
+
+;; ---------------------------------------------------------------------------
+;; Engine limits: a limit reached is a deny with its reason, distinguishable
+;; from a policy deny
+;; ---------------------------------------------------------------------------
+
+(def ^:private reach-rules
+  '[{:id :r1 :head [:reach ?a ?b] :body [[:edge ?a ?b]]}
+    {:id :rn :head [:reach ?a ?c] :body [[:reach ?a ?b] [:edge ?b ?c]]}])
+
+(defn- edges [n] (mapv (fn [i] [:edge i (inc i)]) (range n)))
+
+(deftest engine-limit-denies-with-reason
+  (testing "default limits: a 50-edge closure exceeds 1000 facts"
+    (let [result (-> (pdp/context)
+                     (pdp/add-facts (edges 50))
+                     (pdp/decide :rules reach-rules
+                                 :policies [{:kind :deny :query [[:reach 0 50]]}
+                                            {:kind :allow :query [[:edge 0 1]]}]))]
+      (is (false? (:allowed? result)))
+      (is (= :limit-exceeded (-> result :error :type)))
+      (is (= :max-facts (-> result :error :limit)))))
+  (testing ":limits is passed to the engine"
+    (let [ctx (-> (pdp/context) (pdp/add-facts (edges 10)))
+          pol [{:kind :allow :query [[:edge 0 1]]}]]
+      (is (= {:allowed? true} (pdp/decide ctx :rules reach-rules :policies pol)))
+      (is (= :max-facts
+             (-> (pdp/decide ctx :rules reach-rules :policies pol :limits {:max-facts 30})
+                 :error :limit))))))

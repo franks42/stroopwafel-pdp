@@ -16,8 +16,7 @@
      ;; → {:allowed? true/false}"
   (:require [stroopwafel.core :as engine]
             [signet.chain :as chain]
-            [signet.sign :as sign]
-))
+            [signet.sign :as sign]))
 
 (defn context
   "Create an empty PDP context.
@@ -141,11 +140,14 @@
          :explain? — include proof tree in result
          :trusted-external-keys — vector of kid URNs for trusted
                                   third-party block signers
+         :limits   — engine fixpoint limits (:max-iterations, :max-facts)
 
    Returns:
      {:allowed? boolean}
-     or {:allowed? false :errors [...]}"
-  [ctx & {:keys [rules checks policies explain? trusted-external-keys]}]
+     or {:allowed? false :errors [...]}   (context errors)
+     or {:allowed? false :error {:type :limit-exceeded ...}}
+        (the engine reached a limit before its fixpoint)"
+  [ctx & {:keys [rules checks policies explain? trusted-external-keys limits]}]
   (if (seq (:errors ctx))
     {:allowed? false :errors (:errors ctx)}
     (let [;; Merge all verified chain blocks into a single authority block.
@@ -174,6 +176,8 @@
 
           result (engine/evaluate token
                                   :explain? explain?
-                                  :authorizer authorizer)]
+                                  :authorizer authorizer
+                                  :limits limits)]
       (cond-> {:allowed? (:valid? result)}
+        (:error result) (assoc :error (:error result))
         explain? (assoc :explain (:explain result))))))
