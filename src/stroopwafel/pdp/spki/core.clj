@@ -17,6 +17,7 @@
 
    See docs/assertion-api-proposal.md for the full design."
   (:require [stroopwafel.core :as engine]
+            [stroopwafel.datalog :as datalog]
             [stroopwafel.pdp.spki.assertion :as assertion]
             [stroopwafel.pdp.spki.revocation :as revocation]
             [stroopwafel.pdp.spki.trust :as trust]))
@@ -310,8 +311,17 @@
      or {:allowed? boolean :explain ... :rejected ...}   (explain? mode)
      or {:allowed? false :errors [...]}                  (context errors)
      or {:allowed? false :error {:type :limit-exceeded ...}}
-                        (the engine reached a limit before its fixpoint)"
-  [ctx & {:keys [policies rules checks explain? max-block-ttl-ms limits]}]
+                        (the engine reached a limit before its fixpoint)
+     plus :warnings from the engine when it has any, e.g.
+     [{:type :no-policies}] (no policies: the engine denies, since only a
+     matching :allow allows) or [{:type :arity-mismatch ...}].
+
+   Unknown options throw (:stroopwafel/error :unknown-keys): a typo such as
+   :check would otherwise silently drop the checks."
+  [ctx & {:keys [policies rules checks explain? max-block-ttl-ms limits]
+          :as   opts}]
+  (datalog/check-keys "spki/decide options" opts
+                      #{:policies :rules :checks :explain? :max-block-ttl-ms :limits})
   (if (seq (:errors ctx))
     {:allowed? false :errors (:errors ctx)}
     (let [{:keys [facts rejected]} (pre-filter ctx max-block-ttl-ms)
@@ -330,5 +340,6 @@
                                       :limits     limits)]
       (cond-> {:allowed? (boolean (:valid? result))}
         (:error result) (assoc :error (:error result))
+        (seq (:warnings result)) (assoc :warnings (:warnings result))
         explain? (assoc :explain  (:explain result)
                         :rejected rejected)))))

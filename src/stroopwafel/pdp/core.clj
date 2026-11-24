@@ -15,6 +15,7 @@
            :policies [{:kind :allow :query [...]}]))
      ;; → {:allowed? true/false}"
   (:require [stroopwafel.core :as engine]
+            [stroopwafel.datalog :as datalog]
             [signet.chain :as chain]
             [signet.sign :as sign]))
 
@@ -146,8 +147,17 @@
      {:allowed? boolean}
      or {:allowed? false :errors [...]}   (context errors)
      or {:allowed? false :error {:type :limit-exceeded ...}}
-        (the engine reached a limit before its fixpoint)"
-  [ctx & {:keys [rules checks policies explain? trusted-external-keys limits]}]
+        (the engine reached a limit before its fixpoint)
+     plus :warnings from the engine when it has any, e.g.
+     [{:type :no-policies}] (no policies: the engine denies, since only a
+     matching :allow allows) or [{:type :arity-mismatch ...}].
+
+   Unknown options throw (:stroopwafel/error :unknown-keys): a typo such as
+   :check would otherwise silently drop the checks."
+  [ctx & {:keys [rules checks policies explain? trusted-external-keys limits]
+          :as   opts}]
+  (datalog/check-keys "pdp/decide options" opts
+                      #{:rules :checks :policies :explain? :trusted-external-keys :limits})
   (if (seq (:errors ctx))
     {:allowed? false :errors (:errors ctx)}
     (let [;; Merge all verified chain blocks into a single authority block.
@@ -180,4 +190,5 @@
                                   :limits limits)]
       (cond-> {:allowed? (:valid? result)}
         (:error result) (assoc :error (:error result))
+        (seq (:warnings result)) (assoc :warnings (:warnings result))
         explain? (assoc :explain (:explain result))))))

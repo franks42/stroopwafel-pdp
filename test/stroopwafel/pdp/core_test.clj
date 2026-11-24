@@ -272,3 +272,24 @@
       (is (= :max-facts
              (-> (pdp/decide ctx :rules reach-rules :policies pol :limits {:max-facts 30})
                  :error :limit))))))
+
+;; ---------------------------------------------------------------------------
+;; stroopwafel 0.15.0: no policies denies with a warning; unknown keys throw
+;; ---------------------------------------------------------------------------
+
+(deftest no-policies-denies-with-warning
+  (testing "no policies: denied, and the engine's warning is passed through"
+    (let [ctx (pdp/add-facts (pdp/context) [[:x 1]])]
+      (is (= {:allowed? false :warnings [{:type :no-policies}]} (pdp/decide ctx)))
+      (is (= {:allowed? false :warnings [{:type :no-policies}]}
+             (pdp/decide ctx :policies []))))))
+
+(deftest decide-rejects-unknown-options
+  (testing "a misspelled option throws instead of silently dropping it"
+    (let [ctx (pdp/add-facts (pdp/context) [[:x 1]])]
+      (is (= :unknown-keys
+             (try (pdp/decide ctx :policies [{:kind :allow :query [[:x 1]]}]
+                              :check [{:id :c :query [[:y]]}])
+                  nil
+                  (catch clojure.lang.ExceptionInfo e
+                    (:stroopwafel/error (ex-data e)))))))))

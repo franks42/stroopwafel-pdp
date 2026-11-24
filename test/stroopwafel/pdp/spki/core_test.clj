@@ -557,3 +557,21 @@
         (is (false? (:allowed? result)))
         (is (= {:type :limit-exceeded :limit :max-facts :max 30}
                (select-keys (:error result) [:type :limit :max])))))))
+
+;; ---------------------------------------------------------------------------
+;; stroopwafel 0.15.0: no policies denies with a warning; unknown keys throw
+;; ---------------------------------------------------------------------------
+
+(deftest no-policies-denies-with-warning
+  (let [ctx (-> (spki/context)
+                (spki/add-trust-roots root-kid)
+                (spki/with-templates [capability-template])
+                (spki/add-assertions (cap-block root-kp "alice" :read "/data")))]
+    (is (= {:allowed? false :warnings [{:type :no-policies}]} (spki/decide ctx)))))
+
+(deftest decide-rejects-unknown-options
+  (is (= :unknown-keys
+         (try (spki/decide (spki/context) :policy [{:kind :allow :query []}])
+              nil
+              (catch clojure.lang.ExceptionInfo e
+                (:stroopwafel/error (ex-data e)))))))
