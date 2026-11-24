@@ -56,7 +56,8 @@ All notable changes to stroopwafel-pdp. Each entry reflects committed work.
 - **`decide` passes `:limits` to the engine and returns its `:error`**
   (stroopwafel 0.12.0): a deny caused by a fixpoint limit no longer looks
   like a policy deny.
-- `build.clj` (`clojure -T:build install`); `deps.edn` resolves signet and
+- `build.clj` (`clojure -T:build install`, and `deploy` to Clojars since
+  0.3.0); `deps.edn` resolves signet and
   stroopwafel as `:mvn/version`, with a `:dev` alias overriding both with
   `:local/root` checkouts.
 
