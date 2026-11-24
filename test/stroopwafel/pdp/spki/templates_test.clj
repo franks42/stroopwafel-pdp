@@ -58,7 +58,7 @@
                                              {:max-qty 100}])]})
           rule  '{:id   :within-limits
                   :head [:allowed-trade ?subject ?sym]
-                  :body [[:can ?subject :trade ?sym ?c]]}
+                  :body [[:can-constrained ?subject :trade ?sym ?c]]}
           r     (-> (base-ctx)
                     (spki/add-assertions block)
                     (spki/add-rules [rule])
