@@ -4,12 +4,14 @@
    Usage:
      clojure -T:build jar      ; Create JAR
      clojure -T:build install  ; Install to local Maven repo (~/.m2/repository)
+     clojure -T:build deploy   ; Build JAR and deploy to Clojars
+                               ; (CLOJARS_USERNAME / CLOJARS_PASSWORD in the env)
      clojure -T:build clean    ; Clean build artifacts
 
-   Note: stroopwafel-pdp depends on signet and stroopwafel. Those must
-   already be installed to ~/.m2 before building this (or the consuming
-   deps.edn must use the :dev alias to override with :local/root)."
-  (:require [clojure.tools.build.api :as b]))
+   signet and stroopwafel resolve from Clojars; the :dev alias overrides
+   them with :local/root checkouts."
+  (:require [clojure.tools.build.api :as b]
+            [deps-deploy.deps-deploy :as dd]))
 
 (def lib 'com.github.franks42/stroopwafel-pdp)
 (def version "0.3.0")
@@ -63,3 +65,9 @@
   (println)
   (println "To use in deps.edn:")
   (println (format "  %s {:mvn/version \"%s\"}" lib version)))
+
+(defn deploy [_]
+  (jar nil)
+  (dd/deploy {:installer :remote
+              :artifact  (b/resolve-path jar-file)
+              :pom-file  (b/pom-path {:lib lib :class-dir class-dir})}))
