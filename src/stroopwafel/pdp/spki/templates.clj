@@ -37,12 +37,15 @@
     :body [[?_sayer ?_ts ?_nb ?_na :capability ?_id ?subject ?action ?resource]]})
 
 (def capability-constrained
-  "4-arity :capability assertion → [:can ?subject ?action ?resource ?constraints].
+  "4-arity :capability assertion → [:can-constrained ?subject ?action ?resource ?constraints].
+
+   Its own predicate, not a 5-term `:can`: a predicate has one length
+   (stroopwafel's arity check denies on a mismatch since 0.16.0).
 
    Stored fact shape:
      [sayer ts not-before not-after :capability id subject action resource constraints]"
   '{:id   :tmpl/capability-constrained
-    :head [:can ?subject ?action ?resource ?constraints]
+    :head [:can-constrained ?subject ?action ?resource ?constraints]
     :body [[?_sayer ?_ts ?_nb ?_na :capability ?_id
             ?subject ?action ?resource ?constraints]]})
 
