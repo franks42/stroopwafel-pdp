@@ -1,5 +1,5 @@
 {:paths ["src"]
- :deps  {org.clojure/clojure              {:mvn/version "1.12.4"}
+ :deps  {org.clojure/clojure              {:mvn/version "1.12.7"}
          com.github.franks42/signet      {:mvn/version "0.10.0"}
          com.github.franks42/stroopwafel {:mvn/version "0.16.1"}}
 
@@ -20,6 +20,6 @@
            com.github.franks42/stroopwafel {:local/root "../stroopwafel"}}}
 
   ;; Build alias for tools.build
-  :build {:deps       {io.github.clojure/tools.build {:mvn/version "0.10.6"}
-                      slipset/deps-deploy           {:mvn/version "0.2.2"}}
+  :build {:deps       {io.github.clojure/tools.build {:mvn/version "0.10.14"}
+                       slipset/deps-deploy           {:mvn/version "0.2.5"}}
           :ns-default build}}}
